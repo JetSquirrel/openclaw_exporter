@@ -7,15 +7,21 @@ A Prometheus exporter for monitoring [openclaw](https://deepwiki.com/openclaw) p
 This exporter provides the following metrics:
 
 ### File Metrics
-- `openclaw_file_size_bytes` - Size of openclaw files (soul.md, skill.md, agent.md) in bytes
-- `openclaw_file_mtime_seconds` - Last modification time of openclaw files in seconds since epoch
+- `openclaw_file_size_bytes{file="..."}` - Size of openclaw workspace files in bytes (AGENTS.md, SOUL.md, TOOLS.md, IDENTITY.md, USER.md, HEARTBEAT.md, BOOTSTRAP.md, BOOT.md, MEMORY.md, and legacy soul.md, skill.md, agent.md)
+- `openclaw_file_mtime_seconds{file="..."}` - Last modification time of openclaw files in seconds since epoch
+
+### Workspace File Existence
+- `openclaw_workspace_file_exists{file="..."}` - Whether key workspace files exist (1=exists, 0=missing) for AGENTS.md, SOUL.md, TOOLS.md, IDENTITY.md, USER.md, HEARTBEAT.md, BOOTSTRAP.md, MEMORY.md
 
 ### Context Metrics
 - `openclaw_context_length_total` - Total size of context files in bytes (includes conversation history, tool results, and attachments stored in context*.md files)
 
+### Memory Metrics
+- `openclaw_memory_files_total` - Total number of daily memory files in memory/ directory
+
 ### Counts
-- `openclaw_skills_total` - Total number of skills (H2 sections in skill.md)
-- `openclaw_agents_total` - Total number of agents (H2 sections in agent.md)
+- `openclaw_skills_total` - Total number of skills (counts SKILL.md files in workspace/skills/ and ~/.openclaw/skills/ directories, plus H2 sections in legacy skill.md)
+- `openclaw_agents_total` - Total number of agents (H2 sections in AGENTS.md and legacy agent.md)
 
 ### Response Latency
 - `openclaw_response_duration_seconds` - Response latency histogram (extensible for future use)
@@ -111,21 +117,39 @@ Once running, metrics are available at `http://localhost:9101/metrics`.
 
 Example output:
 ```
-# HELP openclaw_file_size_bytes Size of openclaw files in bytes
+# HELP openclaw_file_size_bytes Size of openclaw workspace files in bytes
 # TYPE openclaw_file_size_bytes gauge
-openclaw_file_size_bytes{file="soul.md"} 1024
-openclaw_file_size_bytes{file="skill.md"} 2048
-openclaw_file_size_bytes{file="agent.md"} 512
+openclaw_file_size_bytes{file="AGENTS.md"} 130
+openclaw_file_size_bytes{file="SOUL.md"} 36
+openclaw_file_size_bytes{file="TOOLS.md"} 33
+openclaw_file_size_bytes{file="IDENTITY.md"} 29
+openclaw_file_size_bytes{file="USER.md"} 24
+openclaw_file_size_bytes{file="MEMORY.md"} 27
 
 # HELP openclaw_file_mtime_seconds Last modification time of openclaw files in seconds since epoch
 # TYPE openclaw_file_mtime_seconds gauge
-openclaw_file_mtime_seconds{file="soul.md"} 1707828000
-openclaw_file_mtime_seconds{file="skill.md"} 1707828100
-openclaw_file_mtime_seconds{file="agent.md"} 1707828200
+openclaw_file_mtime_seconds{file="AGENTS.md"} 1707828000
+openclaw_file_mtime_seconds{file="SOUL.md"} 1707828100
+openclaw_file_mtime_seconds{file="TOOLS.md"} 1707828200
 
-# HELP openclaw_context_length_total Total length of context window in characters
+# HELP openclaw_workspace_file_exists Whether workspace files exist
+# TYPE openclaw_workspace_file_exists gauge
+openclaw_workspace_file_exists{file="AGENTS.md"} 1
+openclaw_workspace_file_exists{file="SOUL.md"} 1
+openclaw_workspace_file_exists{file="TOOLS.md"} 1
+openclaw_workspace_file_exists{file="IDENTITY.md"} 1
+openclaw_workspace_file_exists{file="USER.md"} 1
+openclaw_workspace_file_exists{file="HEARTBEAT.md"} 0
+openclaw_workspace_file_exists{file="BOOTSTRAP.md"} 0
+openclaw_workspace_file_exists{file="MEMORY.md"} 1
+
+# HELP openclaw_context_length_total Total size of context files in bytes
 # TYPE openclaw_context_length_total gauge
 openclaw_context_length_total 15360
+
+# HELP openclaw_memory_files_total Total number of daily memory files
+# TYPE openclaw_memory_files_total gauge
+openclaw_memory_files_total 5
 
 # HELP openclaw_skills_total Total number of skills
 # TYPE openclaw_skills_total gauge

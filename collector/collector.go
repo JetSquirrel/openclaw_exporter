@@ -15,12 +15,14 @@ import (
 type OpenclawCollector struct {
 	dir string
 
-	fileSize      *prometheus.Desc
-	fileMtime     *prometheus.Desc
-	contextLength *prometheus.Desc
-	skillsCount   *prometheus.Desc
-	agentsCount   *prometheus.Desc
-	scrapeSuccess *prometheus.Desc
+	fileSize         *prometheus.Desc
+	fileMtime        *prometheus.Desc
+	contextLength    *prometheus.Desc
+	skillsCount      *prometheus.Desc
+	agentsCount      *prometheus.Desc
+	workspaceFiles   *prometheus.Desc
+	memoryFilesCount *prometheus.Desc
+	scrapeSuccess    *prometheus.Desc
 }
 
 // NewOpenclawCollector creates a new OpenclawCollector.
@@ -44,12 +46,22 @@ func NewOpenclawCollector(dir string) *OpenclawCollector {
 		),
 		skillsCount: prometheus.NewDesc(
 			"openclaw_skills_total",
-			"Total number of skills",
+			"Total number of skills in workspace and managed directories",
 			nil, nil,
 		),
 		agentsCount: prometheus.NewDesc(
 			"openclaw_agents_total",
 			"Total number of agents",
+			nil, nil,
+		),
+		workspaceFiles: prometheus.NewDesc(
+			"openclaw_workspace_file_exists",
+			"Whether workspace files exist (AGENTS.md, SOUL.md, TOOLS.md, IDENTITY.md, USER.md, HEARTBEAT.md, BOOTSTRAP.md, MEMORY.md)",
+			[]string{"file"}, nil,
+		),
+		memoryFilesCount: prometheus.NewDesc(
+			"openclaw_memory_files_total",
+			"Total number of daily memory files in memory/ directory",
 			nil, nil,
 		),
 		scrapeSuccess: prometheus.NewDesc(
@@ -67,6 +79,8 @@ func (c *OpenclawCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.contextLength
 	ch <- c.skillsCount
 	ch <- c.agentsCount
+	ch <- c.workspaceFiles
+	ch <- c.memoryFilesCount
 	ch <- c.scrapeSuccess
 }
 
@@ -79,8 +93,18 @@ func (c *OpenclawCollector) Collect(ch chan<- prometheus.Metric) {
 		success = 0
 	}
 
+	if err := c.collectWorkspaceFileMetrics(ch); err != nil {
+		log.Printf("Error collecting workspace file metrics: %v", err)
+		success = 0
+	}
+
 	if err := c.collectContextMetrics(ch); err != nil {
 		log.Printf("Error collecting context metrics: %v", err)
+		success = 0
+	}
+
+	if err := c.collectMemoryMetrics(ch); err != nil {
+		log.Printf("Error collecting memory metrics: %v", err)
 		success = 0
 	}
 
@@ -98,7 +122,12 @@ func (c *OpenclawCollector) Collect(ch chan<- prometheus.Metric) {
 }
 
 func (c *OpenclawCollector) collectFileMetrics(ch chan<- prometheus.Metric) error {
-	files := []string{"soul.md", "skill.md", "agent.md"}
+	// Monitor core workspace files
+	files := []string{
+		"AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md",
+		"USER.md", "HEARTBEAT.md", "BOOTSTRAP.md", "BOOT.md", "MEMORY.md",
+		"soul.md", "skill.md", "agent.md", // legacy files
+	}
 
 	for _, file := range files {
 		path := filepath.Join(c.dir, file)
@@ -128,6 +157,53 @@ func (c *OpenclawCollector) collectFileMetrics(ch chan<- prometheus.Metric) erro
 	return nil
 }
 
+func (c *OpenclawCollector) collectWorkspaceFileMetrics(ch chan<- prometheus.Metric) error {
+	// Check existence of key workspace files
+	workspaceFiles := []string{
+		"AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md",
+		"USER.md", "HEARTBEAT.md", "BOOTSTRAP.md", "MEMORY.md",
+	}
+
+	for _, file := range workspaceFiles {
+		path := filepath.Join(c.dir, file)
+		exists := 0.0
+		if _, err := os.Stat(path); err == nil {
+			exists = 1.0
+		}
+
+		ch <- prometheus.MustNewConstMetric(
+			c.workspaceFiles,
+			prometheus.GaugeValue,
+			exists,
+			file,
+		)
+	}
+
+	return nil
+}
+
+func (c *OpenclawCollector) collectMemoryMetrics(ch chan<- prometheus.Metric) error {
+	// Count daily memory files in memory/ directory
+	memoryDir := filepath.Join(c.dir, "memory")
+	count := 0
+
+	if entries, err := os.ReadDir(memoryDir); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() && filepath.Ext(entry.Name()) == ".md" {
+				count++
+			}
+		}
+	}
+
+	ch <- prometheus.MustNewConstMetric(
+		c.memoryFilesCount,
+		prometheus.GaugeValue,
+		float64(count),
+	)
+
+	return nil
+}
+
 func (c *OpenclawCollector) collectContextMetrics(ch chan<- prometheus.Metric) error {
 	contextFiles, err := filepath.Glob(filepath.Join(c.dir, "context*.md"))
 	if err != nil {
@@ -153,40 +229,71 @@ func (c *OpenclawCollector) collectContextMetrics(ch chan<- prometheus.Metric) e
 }
 
 func (c *OpenclawCollector) collectSkillsMetrics(ch chan<- prometheus.Metric) error {
+	totalCount := 0
+
+	// Check legacy skill.md file for H2 sections
 	skillPath := filepath.Join(c.dir, "skill.md")
-	count, err := countMarkdownSections(skillPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			count = 0
-		} else {
-			return err
+	if count, err := countMarkdownSections(skillPath); err == nil {
+		totalCount += count
+	}
+
+	// Check workspace skills/ directory for SKILL.md files
+	skillsDir := filepath.Join(c.dir, "skills")
+	if entries, err := os.ReadDir(skillsDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				skillFile := filepath.Join(skillsDir, entry.Name(), "SKILL.md")
+				if _, err := os.Stat(skillFile); err == nil {
+					totalCount++
+				}
+			}
+		}
+	}
+
+	// Check managed skills directory at ~/.openclaw/skills if OPENCLAW_HOME is set
+	openclawHome := os.Getenv("HOME")
+	if openclawHome != "" {
+		managedSkillsDir := filepath.Join(openclawHome, ".openclaw", "skills")
+		if entries, err := os.ReadDir(managedSkillsDir); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					skillFile := filepath.Join(managedSkillsDir, entry.Name(), "SKILL.md")
+					if _, err := os.Stat(skillFile); err == nil {
+						totalCount++
+					}
+				}
+			}
 		}
 	}
 
 	ch <- prometheus.MustNewConstMetric(
 		c.skillsCount,
 		prometheus.GaugeValue,
-		float64(count),
+		float64(totalCount),
 	)
 
 	return nil
 }
 
 func (c *OpenclawCollector) collectAgentsMetrics(ch chan<- prometheus.Metric) error {
+	totalCount := 0
+
+	// Check legacy agent.md file
 	agentPath := filepath.Join(c.dir, "agent.md")
-	count, err := countMarkdownSections(agentPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			count = 0
-		} else {
-			return err
-		}
+	if count, err := countMarkdownSections(agentPath); err == nil {
+		totalCount += count
+	}
+
+	// Check AGENTS.md file
+	agentsPath := filepath.Join(c.dir, "AGENTS.md")
+	if count, err := countMarkdownSections(agentsPath); err == nil {
+		totalCount += count
 	}
 
 	ch <- prometheus.MustNewConstMetric(
 		c.agentsCount,
 		prometheus.GaugeValue,
-		float64(count),
+		float64(totalCount),
 	)
 
 	return nil
