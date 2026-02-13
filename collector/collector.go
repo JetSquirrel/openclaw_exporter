@@ -39,7 +39,7 @@ func NewOpenclawCollector(dir string) *OpenclawCollector {
 		),
 		contextLength: prometheus.NewDesc(
 			"openclaw_context_length_total",
-			"Total length of context window in characters",
+			"Total size of context files in bytes (includes conversation history, tool results, and attachments)",
 			nil, nil,
 		),
 		skillsCount: prometheus.NewDesc(

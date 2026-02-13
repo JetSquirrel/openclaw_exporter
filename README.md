@@ -11,7 +11,7 @@ This exporter provides the following metrics:
 - `openclaw_file_mtime_seconds` - Last modification time of openclaw files in seconds since epoch
 
 ### Context Metrics
-- `openclaw_context_length_total` - Total length of context window in characters (sum of all context*.md files)
+- `openclaw_context_length_total` - Total size of context files in bytes (includes conversation history, tool results, and attachments stored in context*.md files)
 
 ### Counts
 - `openclaw_skills_total` - Total number of skills (H2 sections in skill.md)
