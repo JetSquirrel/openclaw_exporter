@@ -14,9 +14,10 @@ import (
 
 func main() {
 	var (
-		listenAddr  = flag.String("web.listen-address", ":9101", "Address to listen on for web interface and telemetry")
-		metricsPath = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics")
-		openclawDir = flag.String("openclaw.dir", os.Getenv("OPENCLAW_DIR"), "Path to openclaw data directory")
+		listenAddr    = flag.String("web.listen-address", ":9101", "Address to listen on for web interface and telemetry")
+		metricsPath   = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics")
+		openclawDir   = flag.String("openclaw.dir", os.Getenv("OPENCLAW_DIR"), "Path to openclaw workspace directory")
+		openclawHome  = flag.String("openclaw.home", os.Getenv("OPENCLAW_HOME"), "Path to openclaw home directory (default: ~/.openclaw)")
 	)
 	flag.Parse()
 
@@ -24,10 +25,21 @@ func main() {
 		log.Fatal("openclaw.dir must be specified via flag or OPENCLAW_DIR environment variable")
 	}
 
+	// Default openclaw home to ~/.openclaw if not specified
+	openclawHomePath := *openclawHome
+	if openclawHomePath == "" {
+		openclawHomePath = os.Getenv("HOME") + "/.openclaw"
+	}
+
 	registry := prometheus.NewRegistry()
 
+	// Register workspace collector
 	openclawCollector := collector.NewOpenclawCollector(*openclawDir)
 	registry.MustRegister(openclawCollector)
+
+	// Register session collector
+	sessionCollector := collector.NewSessionCollector(openclawHomePath)
+	registry.MustRegister(sessionCollector)
 
 	http.Handle(*metricsPath, promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -41,6 +53,7 @@ func main() {
 	})
 
 	log.Printf("Starting openclaw exporter on %s", *listenAddr)
+	log.Printf("Workspace: %s, Home: %s", *openclawDir, openclawHomePath)
 	if err := http.ListenAndServe(*listenAddr, nil); err != nil {
 		log.Fatal(err)
 	}
