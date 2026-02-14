@@ -1,6 +1,5 @@
 # Binaries
 openclaw_exporter
-openclaw_expoter
 *.exe
 *.exe~
 *.dll
