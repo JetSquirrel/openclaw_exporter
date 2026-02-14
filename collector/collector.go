@@ -11,6 +11,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// Default system skills directory (openclaw npm package location)
+const defaultSystemSkillsDir = "/opt/homebrew/lib/node_modules/openclaw/skills"
+
 // OpenclawCollector collects metrics from openclaw data directory.
 type OpenclawCollector struct {
 	dir string
@@ -51,7 +54,7 @@ func NewOpenclawCollector(dir string) *OpenclawCollector {
 		),
 		agentsCount: prometheus.NewDesc(
 			"openclaw_agents_total",
-			"Total number of agents",
+			"Total number of agents (counts agent definitions in agent.md, if present)",
 			nil, nil,
 		),
 		workspaceFiles: prometheus.NewDesc(
@@ -123,13 +126,27 @@ func (c *OpenclawCollector) Collect(ch chan<- prometheus.Metric) {
 
 func (c *OpenclawCollector) collectFileMetrics(ch chan<- prometheus.Metric) error {
 	// Monitor core workspace files
+	// Use a map to track which files we've already seen (case-insensitive)
+	// to avoid counting both SOUL.md and soul.md
 	files := []string{
 		"AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md",
 		"USER.md", "HEARTBEAT.md", "BOOTSTRAP.md", "BOOT.md", "MEMORY.md",
-		"soul.md", "skill.md", "agent.md", // legacy files
+		"soul.md", "skill.md", "agent.md", // legacy files (lowercase)
 	}
 
+	// Track which base names we've already reported (lowercase for case-insensitive check)
+	reported := make(map[string]bool)
+
 	for _, file := range files {
+		// Get the lowercase version for deduplication check
+		fileLower := strings.ToLower(file)
+
+		// Check if we already reported this file (case-insensitive)
+		// Skip lowercase version if uppercase version exists
+		if reported[fileLower] {
+			continue
+		}
+
 		path := filepath.Join(c.dir, file)
 		info, err := os.Stat(path)
 		if err != nil {
@@ -138,6 +155,9 @@ func (c *OpenclawCollector) collectFileMetrics(ch chan<- prometheus.Metric) erro
 			}
 			return err
 		}
+
+		// Mark this base name as reported
+		reported[fileLower] = true
 
 		ch <- prometheus.MustNewConstMetric(
 			c.fileSize,
@@ -250,17 +270,34 @@ func (c *OpenclawCollector) collectSkillsMetrics(ch chan<- prometheus.Metric) er
 		}
 	}
 
-	// Check managed skills directory at ~/.openclaw/skills if OPENCLAW_HOME is set
-	openclawHome := os.Getenv("HOME")
-	if openclawHome != "" {
-		managedSkillsDir := filepath.Join(openclawHome, ".openclaw", "skills")
-		if entries, err := os.ReadDir(managedSkillsDir); err == nil {
+	// Check user skills directory at ~/.openclaw/skills
+	homeDir := os.Getenv("HOME")
+	if homeDir != "" {
+		userSkillsDir := filepath.Join(homeDir, ".openclaw", "skills")
+		if entries, err := os.ReadDir(userSkillsDir); err == nil {
 			for _, entry := range entries {
 				if entry.IsDir() {
-					skillFile := filepath.Join(managedSkillsDir, entry.Name(), "SKILL.md")
+					skillFile := filepath.Join(userSkillsDir, entry.Name(), "SKILL.md")
 					if _, err := os.Stat(skillFile); err == nil {
 						totalCount++
 					}
+				}
+			}
+		}
+	}
+
+	// Check system skills directory (openclaw npm package)
+	// Can be overridden via OPENCLAW_SKILLS_DIR environment variable
+	systemSkillsDir := os.Getenv("OPENCLAW_SKILLS_DIR")
+	if systemSkillsDir == "" {
+		systemSkillsDir = defaultSystemSkillsDir
+	}
+	if entries, err := os.ReadDir(systemSkillsDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				skillFile := filepath.Join(systemSkillsDir, entry.Name(), "SKILL.md")
+				if _, err := os.Stat(skillFile); err == nil {
+					totalCount++
 				}
 			}
 		}
@@ -278,15 +315,10 @@ func (c *OpenclawCollector) collectSkillsMetrics(ch chan<- prometheus.Metric) er
 func (c *OpenclawCollector) collectAgentsMetrics(ch chan<- prometheus.Metric) error {
 	totalCount := 0
 
-	// Check legacy agent.md file
+	// Check legacy agent.md file for agent definitions (H2 sections)
+	// Note: AGENTS.md is a workspace configuration document, not an agent list
 	agentPath := filepath.Join(c.dir, "agent.md")
 	if count, err := countMarkdownSections(agentPath); err == nil {
-		totalCount += count
-	}
-
-	// Check AGENTS.md file
-	agentsPath := filepath.Join(c.dir, "AGENTS.md")
-	if count, err := countMarkdownSections(agentsPath); err == nil {
 		totalCount += count
 	}
 
