@@ -1,193 +1,262 @@
-# Openclaw Exporter
+# OpenClaw Exporter
 
-A Prometheus exporter for monitoring [openclaw](https://deepwiki.com/openclaw) personal AI assistant metrics.
+A Prometheus exporter for monitoring [OpenClaw](https://github.com/openclaw/openclaw) AI assistant metrics.
+
+Monitor your OpenClaw sessions, token usage, costs, and workspace health with Prometheus and Grafana.
 
 ## Features
 
-This exporter provides the following metrics:
+### Session Metrics
+Track your AI assistant usage in real-time:
+- **Token usage**: input, output, cache read
+- **Cost tracking**: cumulative cost in USD
+- **Model info**: current provider and model
+- **Thinking level**: 0-3 scale
+- **Message count**: session activity
 
-### File Metrics
-- `openclaw_file_size_bytes{file="..."}` - Size of openclaw workspace files in bytes (AGENTS.md, SOUL.md, TOOLS.md, IDENTITY.md, USER.md, HEARTBEAT.md, BOOTSTRAP.md, BOOT.md, MEMORY.md, and legacy soul.md, skill.md, agent.md)
-- `openclaw_file_mtime_seconds{file="..."}` - Last modification time of openclaw files in seconds since epoch
+### Workspace Metrics
+Monitor your OpenClaw workspace:
+- **File metrics**: size and modification time for key files
+- **Health checks**: workspace file existence
+- **Memory tracking**: daily memory files count
+- **Skills count**: installed skills from all sources
 
-### Workspace File Existence
-- `openclaw_workspace_file_exists{file="..."}` - Whether key workspace files exist (1=exists, 0=missing) for AGENTS.md, SOUL.md, TOOLS.md, IDENTITY.md, USER.md, HEARTBEAT.md, BOOTSTRAP.md, MEMORY.md
+## Quick Start
 
-### Context Metrics
-- `openclaw_context_length_total` - Total size of context files in bytes (includes conversation history, tool results, and attachments stored in context*.md files)
+### 1. Install Prometheus
 
-### Memory Metrics
-- `openclaw_memory_files_total` - Total number of daily memory files in memory/ directory
-
-### Skills & Agents
-- `openclaw_skills_total` - Total number of skills (counts SKILL.md files in workspace/skills/, ~/.openclaw/skills/, and system skills directory)
-- `openclaw_agents_total` - Total number of agent definitions (legacy agent.md only)
-
-### Session Runtime Metrics
-- `openclaw_session_active{agent, session_id}` - Number of active sessions (1 if active)
-- `openclaw_session_messages_total{agent, session_id}` - Total messages in current session
-- `openclaw_session_updated_timestamp{agent, session_id}` - Last update timestamp (Unix seconds)
-- `openclaw_session_tokens_input_total{agent, session_id}` - Total input tokens used
-- `openclaw_session_tokens_output_total{agent, session_id}` - Total output tokens used
-- `openclaw_session_tokens_cache_read_total{agent, session_id}` - Total cache read tokens
-- `openclaw_session_tokens_total{agent, session_id}` - Total tokens (input + output + cache)
-- `openclaw_session_cost_total{agent, session_id}` - Total cost in USD
-- `openclaw_model_info{agent, session_id, provider, model}` - Current model info (value=1)
-- `openclaw_thinking_level{agent, session_id}` - Thinking level (0=off, 1=low, 2=medium, 3=high)
-
-### Health
-- `openclaw_scrape_success` - Whether the last scrape was successful (1 = success, 0 = failure)
-- `openclaw_session_scrape_success{agent}` - Whether session scrape was successful
-
-## Installation
-
-### From Source
-
+**macOS:**
 ```bash
-go install github.com/JetSquirrel/openclaw_expoter@latest
+brew install prometheus
 ```
 
-### Build Locally
+**Linux:**
+See [Prometheus Installation](https://prometheus.io/docs/prometheus/latest/getting_started/)
 
+### 2. Install OpenClaw Exporter
+
+**Download from GitHub Releases:**
 ```bash
-git clone https://github.com/JetSquirrel/openclaw_expoter.git
-cd openclaw_expoter
+# macOS (Apple Silicon)
+curl -sL https://github.com/JetSquirrel/openclaw_exporter/releases/latest/download/openclaw-exporter-darwin-arm64 -o openclaw_exporter
+chmod +x openclaw_exporter
+sudo mv openclaw_exporter /usr/local/bin/
+
+# macOS (Intel)
+curl -sL https://github.com/JetSquirrel/openclaw_exporter/releases/latest/download/openclaw-exporter-darwin-amd64 -o openclaw_exporter
+chmod +x openclaw_exporter
+sudo mv openclaw_exporter /usr/local/bin/
+
+# Linux (amd64)
+curl -sL https://github.com/JetSquirrel/openclaw_exporter/releases/latest/download/openclaw-exporter-linux-amd64 -o openclaw_exporter
+chmod +x openclaw_exporter
+sudo mv openclaw_exporter /usr/local/bin/
+```
+
+**Or build from source:**
+```bash
+git clone https://github.com/JetSquirrel/openclaw_exporter.git
+cd openclaw_exporter
 go build -o openclaw_exporter .
 ```
 
-## Usage
+### 3. Configure Prometheus
 
-### Command Line Flags
-
-```bash
-./openclaw_exporter [flags]
-```
-
-Available flags:
-- `-openclaw.dir` - Path to openclaw workspace directory (can also be set via `OPENCLAW_DIR` environment variable)
-- `-openclaw.home` - Path to openclaw home directory (default: `~/.openclaw`, can also be set via `OPENCLAW_HOME`)
-- `-web.listen-address` - Address to listen on for web interface and telemetry (default: `:9101`)
-- `-web.telemetry-path` - Path under which to expose metrics (default: `/metrics`)
-
-### Examples
-
-Using command line flag:
-```bash
-./openclaw_exporter -openclaw.dir=/path/to/openclaw/data
-```
-
-Using environment variable:
-```bash
-export OPENCLAW_DIR=/path/to/openclaw/data
-./openclaw_exporter
-```
-
-Custom listen address:
-```bash
-./openclaw_exporter -openclaw.dir=/path/to/openclaw/data -web.listen-address=:9090
-```
-
-### Docker
-
-Create a `Dockerfile`:
-
-```dockerfile
-FROM golang:1.21-alpine AS builder
-WORKDIR /app
-COPY . .
-RUN go build -o openclaw_exporter .
-
-FROM alpine:latest
-RUN apk --no-cache add ca-certificates
-COPY --from=builder /app/openclaw_exporter /usr/local/bin/
-EXPOSE 9101
-ENTRYPOINT ["/usr/local/bin/openclaw_exporter"]
-```
-
-Build and run:
-```bash
-docker build -t openclaw_exporter .
-docker run -d -p 9101:9101 -v /path/to/openclaw/data:/data openclaw_exporter -openclaw.dir=/data
-```
-
-## Prometheus Configuration
-
-Add the following to your `prometheus.yml`:
-
+Create `prometheus.yml`:
 ```yaml
+global:
+  scrape_interval: 15s
+
 scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
   - job_name: 'openclaw'
     static_configs:
       - targets: ['localhost:9101']
-    scrape_interval: 30s
+    scrape_interval: 5s
 ```
 
-## Metrics Endpoint
+### 4. Run
 
-Once running, metrics are available at `http://localhost:9101/metrics`.
+```bash
+# Start Prometheus
+prometheus --config.file=prometheus.yml --storage.tsdb.path=./data
 
-Example output:
+# Start Exporter
+openclaw_exporter -openclaw.dir=~/.openclaw/workspace
 ```
-# HELP openclaw_file_size_bytes Size of openclaw workspace files in bytes
-# TYPE openclaw_file_size_bytes gauge
-openclaw_file_size_bytes{file="AGENTS.md"} 130
-openclaw_file_size_bytes{file="SOUL.md"} 36
-openclaw_file_size_bytes{file="TOOLS.md"} 33
-openclaw_file_size_bytes{file="IDENTITY.md"} 29
-openclaw_file_size_bytes{file="USER.md"} 24
-openclaw_file_size_bytes{file="MEMORY.md"} 27
 
-# HELP openclaw_file_mtime_seconds Last modification time of openclaw files in seconds since epoch
-# TYPE openclaw_file_mtime_seconds gauge
-openclaw_file_mtime_seconds{file="AGENTS.md"} 1707828000
-openclaw_file_mtime_seconds{file="SOUL.md"} 1707828100
-openclaw_file_mtime_seconds{file="TOOLS.md"} 1707828200
+### 5. View Metrics
 
-# HELP openclaw_workspace_file_exists Whether workspace files exist
-# TYPE openclaw_workspace_file_exists gauge
-openclaw_workspace_file_exists{file="AGENTS.md"} 1
-openclaw_workspace_file_exists{file="SOUL.md"} 1
-openclaw_workspace_file_exists{file="TOOLS.md"} 1
-openclaw_workspace_file_exists{file="IDENTITY.md"} 1
-openclaw_workspace_file_exists{file="USER.md"} 1
-openclaw_workspace_file_exists{file="HEARTBEAT.md"} 0
-openclaw_workspace_file_exists{file="BOOTSTRAP.md"} 0
-openclaw_workspace_file_exists{file="MEMORY.md"} 1
+- **Prometheus UI**: http://localhost:9090
+- **Exporter Metrics**: http://localhost:9101/metrics
 
-# HELP openclaw_context_length_total Total size of context files in bytes
-# TYPE openclaw_context_length_total gauge
-openclaw_context_length_total 15360
+## Auto-start Services
 
-# HELP openclaw_memory_files_total Total number of daily memory files
-# TYPE openclaw_memory_files_total gauge
-openclaw_memory_files_total 5
+### macOS (launchd)
+
+Create `~/Library/LaunchAgents/local.openclaw.exporter.plist`:
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.openclaw.exporter</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/openclaw_exporter</string>
+        <string>-openclaw.dir</string>
+        <string>/Users/YOUR_USER/.openclaw/workspace</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/openclaw-exporter.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/openclaw-exporter.log</string>
+</dict>
+</plist>
+```
+
+Create `~/Library/LaunchAgents/local.prometheus.plist`:
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.prometheus</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/prometheus</string>
+        <string>--config.file</string>
+        <string>/Users/YOUR_USER/.openclaw/workspace/prometheus.yml</string>
+        <string>--storage.tsdb.path</string>
+        <string>/Users/YOUR_USER/.openclaw/workspace/data</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/prometheus.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/prometheus.log</string>
+</dict>
+</plist>
+```
+
+Load services:
+```bash
+launchctl load ~/Library/LaunchAgents/local.openclaw.exporter.plist
+launchctl load ~/Library/LaunchAgents/local.prometheus.plist
+```
+
+### Linux (systemd)
+
+See [SKILL.md](./SKILL.md) for full systemd configuration.
+
+## Available Metrics
+
+### Session Runtime
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `openclaw_session_active` | agent, session_id | Active session count |
+| `openclaw_session_messages_total` | agent, session_id | Total messages |
+| `openclaw_session_tokens_input_total` | agent, session_id | Input tokens |
+| `openclaw_session_tokens_output_total` | agent, session_id | Output tokens |
+| `openclaw_session_tokens_cache_read_total` | agent, session_id | Cache read tokens |
+| `openclaw_session_tokens_total` | agent, session_id | Total tokens |
+| `openclaw_session_cost_total` | agent, session_id | Total cost (USD) |
+| `openclaw_model_info` | agent, session_id, provider, model | Current model |
+| `openclaw_thinking_level` | agent, session_id | Thinking level (0-3) |
+
+### Workspace
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `openclaw_file_size_bytes` | file | File size in bytes |
+| `openclaw_file_mtime_seconds` | file | Last modification time |
+| `openclaw_workspace_file_exists` | file | File exists (1/0) |
+| `openclaw_memory_files_total` | - | Daily memory files count |
+| `openclaw_skills_total` | - | Total skills count |
+| `openclaw_context_length_total` | - | Context files total size |
+
+## Example PromQL Queries
+
+```promql
+# Token usage rate (per minute)
+rate(openclaw_session_tokens_total[5m]) * 60
+
+# Cost accumulation over time
+openclaw_session_cost_total
+
+# Current model info
+openclaw_model_info
+
+# Average tokens per message
+openclaw_session_tokens_total / openclaw_session_messages_total
+
+# Workspace health (all files exist?)
+sum(openclaw_workspace_file_exists) / count(openclaw_workspace_file_exists)
+```
+
+## Command Line Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-openclaw.dir` | `$OPENCLAW_DIR` | Path to OpenClaw workspace |
+| `-openclaw.home` | `~/.openclaw` | Path to OpenClaw home |
+| `-web.listen-address` | `:9101` | Listen address |
+| `-web.telemetry-path` | `/metrics` | Metrics path |
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPENCLAW_DIR` | - | OpenClaw workspace directory |
+| `OPENCLAW_HOME` | `~/.openclaw` | OpenClaw home directory |
+| `OPENCLAW_SKILLS_DIR` | `/opt/homebrew/lib/node_modules/openclaw/skills` | System skills directory |
+
+## Example Output
+
+```
+# HELP openclaw_session_active Number of active sessions
+# TYPE openclaw_session_active gauge
+openclaw_session_active{agent="main",session_id="ac610a79-..."} 1
+
+# HELP openclaw_session_cost_total Total cost in USD for session
+# TYPE openclaw_session_cost_total gauge
+openclaw_session_cost_total{agent="main",session_id="ac610a79-..."} 1.13
+
+# HELP openclaw_session_tokens_total Total tokens used in session
+# TYPE openclaw_session_tokens_total gauge
+openclaw_session_tokens_total{agent="main",session_id="ac610a79-..."} 4.98e+06
+
+# HELP openclaw_model_info Current model information
+# TYPE openclaw_model_info gauge
+openclaw_model_info{agent="main",model="z-ai/glm-5",provider="openrouter",session_id="ac610a79-..."} 1
+
+# HELP openclaw_thinking_level Current thinking level
+# TYPE openclaw_thinking_level gauge
+openclaw_thinking_level{agent="main",session_id="ac610a79-..."} 1
 
 # HELP openclaw_skills_total Total number of skills
 # TYPE openclaw_skills_total gauge
-openclaw_skills_total 5
+openclaw_skills_total 51
 
-# HELP openclaw_agents_total Total number of agents
-# TYPE openclaw_agents_total gauge
-openclaw_agents_total 3
-
-# HELP openclaw_scrape_success Whether the last scrape was successful
-# TYPE openclaw_scrape_success gauge
-openclaw_scrape_success 1
+# HELP openclaw_file_size_bytes Size of openclaw files in bytes
+# TYPE openclaw_file_size_bytes gauge
+openclaw_file_size_bytes{file="AGENTS.md"} 7848
+openclaw_file_size_bytes{file="SOUL.md"} 5053
+openclaw_file_size_bytes{file="MEMORY.md"} 2448
 ```
 
-## Architecture
-
-The exporter follows Prometheus best practices:
-
-- **Collector Pattern**: Implements `prometheus.Collector` interface for efficient metric collection
-- **Pull Model**: Prometheus scrapes metrics on-demand
-- **Idiomatic Go**: Follows [Effective Go](https://go.dev/doc/effective_go) conventions
-- **Error Handling**: Graceful error handling with scrape success indicator
-- **Minimal Dependencies**: Only uses official Prometheus client library
-
-## Development
-
-### Project Structure
+## Project Structure
 
 ```
 .
@@ -195,45 +264,18 @@ The exporter follows Prometheus best practices:
 ├── collector/
 │   ├── collector.go     # Workspace metrics collector
 │   └── session_collector.go  # Session runtime metrics collector
+├── SKILL.md             # Detailed operation guide
+├── README.md
 ├── go.mod
-├── go.sum
-└── README.md
-```
-
-### Building
-
-```bash
-go build -o openclaw_exporter .
-```
-
-### Testing
-
-Create a test openclaw directory:
-```bash
-mkdir -p /tmp/openclaw_test
-echo "# Soul" > /tmp/openclaw_test/soul.md
-echo "# Skills\n## Skill 1\n## Skill 2" > /tmp/openclaw_test/skill.md
-echo "# Agents\n## Agent 1" > /tmp/openclaw_test/agent.md
-```
-
-Run the exporter:
-```bash
-./openclaw_exporter -openclaw.dir=/tmp/openclaw_test
-```
-
-Test the endpoint:
-```bash
-curl http://localhost:9101/metrics
+└── go.sum
 ```
 
 ## License
 
 MIT License
 
-## References
+## Links
 
-- [Openclaw Overview](https://deepwiki.com/openclaw/openclaw/1-overview)
-- [Openclaw Agent Execution Flow](https://deepwiki.com/openclaw/openclaw/5.1-agent-execution-flow)
-- [Openclaw Context Management](https://deepwiki.com/openclaw/openclaw/5.5-context-overflow-and-auto-compaction)
-- [Prometheus Documentation](https://prometheus.io/docs/)
-- [Writing Exporters](https://prometheus.io/docs/instrumenting/writing_exporters/)
+- [OpenClaw](https://github.com/openclaw/openclaw)
+- [Prometheus](https://prometheus.io/)
+- [Grafana](https://grafana.com/) (for visualization)
