@@ -1,4 +1,4 @@
-module github.com/JetSquirrel/openclaw_expoter
+module github.com/JetSquirrel/openclaw_exporter
 
 go 1.24.13
 
