@@ -19,15 +19,25 @@ This exporter provides the following metrics:
 ### Memory Metrics
 - `openclaw_memory_files_total` - Total number of daily memory files in memory/ directory
 
-### Counts
-- `openclaw_skills_total` - Total number of skills (counts SKILL.md files in workspace/skills/ and ~/.openclaw/skills/ directories, plus H2 sections in legacy skill.md)
-- `openclaw_agents_total` - Total number of agents (H2 sections in AGENTS.md and legacy agent.md)
+### Skills & Agents
+- `openclaw_skills_total` - Total number of skills (counts SKILL.md files in workspace/skills/, ~/.openclaw/skills/, and system skills directory)
+- `openclaw_agents_total` - Total number of agent definitions (legacy agent.md only)
 
-### Response Latency
-- `openclaw_response_duration_seconds` - Response latency histogram (extensible for future use)
+### Session Runtime Metrics
+- `openclaw_session_active{agent, session_id}` - Number of active sessions (1 if active)
+- `openclaw_session_messages_total{agent, session_id}` - Total messages in current session
+- `openclaw_session_updated_timestamp{agent, session_id}` - Last update timestamp (Unix seconds)
+- `openclaw_session_tokens_input_total{agent, session_id}` - Total input tokens used
+- `openclaw_session_tokens_output_total{agent, session_id}` - Total output tokens used
+- `openclaw_session_tokens_cache_read_total{agent, session_id}` - Total cache read tokens
+- `openclaw_session_tokens_total{agent, session_id}` - Total tokens (input + output + cache)
+- `openclaw_session_cost_total{agent, session_id}` - Total cost in USD
+- `openclaw_model_info{agent, session_id, provider, model}` - Current model info (value=1)
+- `openclaw_thinking_level{agent, session_id}` - Thinking level (0=off, 1=low, 2=medium, 3=high)
 
 ### Health
 - `openclaw_scrape_success` - Whether the last scrape was successful (1 = success, 0 = failure)
+- `openclaw_session_scrape_success{agent}` - Whether session scrape was successful
 
 ## Installation
 
@@ -54,7 +64,8 @@ go build -o openclaw_exporter .
 ```
 
 Available flags:
-- `-openclaw.dir` - Path to openclaw data directory (can also be set via `OPENCLAW_DIR` environment variable)
+- `-openclaw.dir` - Path to openclaw workspace directory (can also be set via `OPENCLAW_DIR` environment variable)
+- `-openclaw.home` - Path to openclaw home directory (default: `~/.openclaw`, can also be set via `OPENCLAW_HOME`)
 - `-web.listen-address` - Address to listen on for web interface and telemetry (default: `:9101`)
 - `-web.telemetry-path` - Path under which to expose metrics (default: `/metrics`)
 
@@ -182,7 +193,8 @@ The exporter follows Prometheus best practices:
 .
 ├── main.go              # HTTP server and entry point
 ├── collector/
-│   └── collector.go     # Metrics collectors
+│   ├── collector.go     # Workspace metrics collector
+│   └── session_collector.go  # Session runtime metrics collector
 ├── go.mod
 ├── go.sum
 └── README.md
