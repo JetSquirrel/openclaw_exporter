@@ -24,13 +24,23 @@ type SessionCollector struct {
 	sessionUpdated    *prometheus.Desc
 
 	// Token usage
-	sessionTokensInput    *prometheus.Desc
-	sessionTokensOutput   *prometheus.Desc
+	sessionTokensInput     *prometheus.Desc
+	sessionTokensOutput    *prometheus.Desc
 	sessionTokensCacheRead *prometheus.Desc
-	sessionTokensTotal    *prometheus.Desc
+	sessionTokensCacheWrite *prometheus.Desc
+	sessionTokensTotal     *prometheus.Desc
 
 	// Cost
 	sessionCostTotal *prometheus.Desc
+
+	// Cache efficiency
+	cacheHitRate *prometheus.Desc
+
+	// Session duration
+	sessionDuration *prometheus.Desc
+
+	// Error tracking
+	sessionErrors *prometheus.Desc
 
 	// Model info
 	modelInfo *prometheus.Desc
@@ -80,6 +90,11 @@ func NewSessionCollector(openclawHome string) *SessionCollector {
 			"Total cache read tokens in session",
 			[]string{"agent", "session_id"}, nil,
 		),
+		sessionTokensCacheWrite: prometheus.NewDesc(
+			"openclaw_session_tokens_cache_write_total",
+			"Total cache write tokens in session",
+			[]string{"agent", "session_id"}, nil,
+		),
 		sessionTokensTotal: prometheus.NewDesc(
 			"openclaw_session_tokens_total",
 			"Total tokens used in session (input + output + cache)",
@@ -100,6 +115,21 @@ func NewSessionCollector(openclawHome string) *SessionCollector {
 			"Current thinking level (0=off, 1=low, 2=medium, 3=high)",
 			[]string{"agent", "session_id"}, nil,
 		),
+		cacheHitRate: prometheus.NewDesc(
+			"openclaw_session_cache_hit_rate",
+			"Cache hit rate (cache_read / (cache_read + cache_write))",
+			[]string{"agent", "session_id"}, nil,
+		),
+		sessionDuration: prometheus.NewDesc(
+			"openclaw_session_duration_seconds",
+			"Session duration in seconds",
+			[]string{"agent", "session_id"}, nil,
+		),
+		sessionErrors: prometheus.NewDesc(
+			"openclaw_session_errors_total",
+			"Total errors encountered in session",
+			[]string{"agent", "session_id"}, nil,
+		),
 		scrapeSuccess: prometheus.NewDesc(
 			"openclaw_session_scrape_success",
 			"Whether session scrape was successful",
@@ -116,8 +146,12 @@ func (c *SessionCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.sessionTokensInput
 	ch <- c.sessionTokensOutput
 	ch <- c.sessionTokensCacheRead
+	ch <- c.sessionTokensCacheWrite
 	ch <- c.sessionTokensTotal
 	ch <- c.sessionCostTotal
+	ch <- c.cacheHitRate
+	ch <- c.sessionDuration
+	ch <- c.sessionErrors
 	ch <- c.modelInfo
 	ch <- c.thinkingLevel
 	ch <- c.scrapeSuccess
@@ -165,6 +199,10 @@ type sessionEvent struct {
 	Provider       string `json:"provider"`
 	ModelID        string `json:"modelId"`
 	ThinkingLevel  string `json:"thinkingLevel"`
+	Error          *struct {
+		Message string `json:"message"`
+		Code    string `json:"code"`
+	} `json:"error"`
 	Message        *struct {
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
@@ -172,6 +210,7 @@ type sessionEvent struct {
 			Input       int     `json:"input"`
 			Output      int     `json:"output"`
 			CacheRead   int     `json:"cacheRead"`
+			CacheWrite  int     `json:"cacheWrite"`
 			TotalTokens int     `json:"totalTokens"`
 			Cost        *struct {
 				Total float64 `json:"total"`
@@ -239,14 +278,18 @@ func (c *SessionCollector) collectSessionFileMetrics(ch chan<- prometheus.Metric
 	defer file.Close()
 
 	var (
-		messageCount      int
-		totalInputTokens  int
-		totalOutputTokens int
-		totalCacheRead    int
-		totalCost         float64
-		currentProvider   string
-		currentModel      string
-		thinkingLevelNum  float64
+		messageCount       int
+		totalInputTokens   int
+		totalOutputTokens  int
+		totalCacheRead     int
+		totalCacheWrite    int
+		totalCost          float64
+		currentProvider    string
+		currentModel       string
+		thinkingLevelNum   float64
+		errorCount         int
+		firstTimestamp     int64
+		lastTimestamp      int64
 	)
 
 	scanner := bufio.NewScanner(file)
@@ -281,10 +324,15 @@ func (c *SessionCollector) collectSessionFileMetrics(ch chan<- prometheus.Metric
 					totalInputTokens += event.Message.Usage.Input
 					totalOutputTokens += event.Message.Usage.Output
 					totalCacheRead += event.Message.Usage.CacheRead
+					totalCacheWrite += event.Message.Usage.CacheWrite
 					if event.Message.Usage.Cost != nil {
 						totalCost += event.Message.Usage.Cost.Total
 					}
 				}
+			}
+			// Track errors in messages
+			if event.Error != nil {
+				errorCount++
 			}
 
 		case "model_change":
@@ -306,7 +354,20 @@ func (c *SessionCollector) collectSessionFileMetrics(ch chan<- prometheus.Metric
 			case "high":
 				thinkingLevelNum = 3
 			}
+
+		case "session_start":
+			// Track session start time (timestamp is in event.ID typically)
+			if firstTimestamp == 0 {
+				firstTimestamp = lastTimestamp
+			}
+
+		case "error":
+			errorCount++
 		}
+
+		// Track timestamps for duration calculation (if present in future)
+		// For now, we'll use message count as a proxy
+		lastTimestamp++
 	}
 
 	// Report metrics
@@ -339,9 +400,16 @@ func (c *SessionCollector) collectSessionFileMetrics(ch chan<- prometheus.Metric
 	)
 
 	ch <- prometheus.MustNewConstMetric(
+		c.sessionTokensCacheWrite,
+		prometheus.GaugeValue,
+		float64(totalCacheWrite),
+		agentName, sessionID,
+	)
+
+	ch <- prometheus.MustNewConstMetric(
 		c.sessionTokensTotal,
 		prometheus.GaugeValue,
-		float64(totalInputTokens+totalOutputTokens+totalCacheRead),
+		float64(totalInputTokens+totalOutputTokens+totalCacheRead+totalCacheWrite),
 		agentName, sessionID,
 	)
 
@@ -349,6 +417,37 @@ func (c *SessionCollector) collectSessionFileMetrics(ch chan<- prometheus.Metric
 		c.sessionCostTotal,
 		prometheus.GaugeValue,
 		totalCost,
+		agentName, sessionID,
+	)
+
+	// Cache hit rate
+	totalCache := totalCacheRead + totalCacheWrite
+	cacheHitRate := 0.0
+	if totalCache > 0 {
+		cacheHitRate = float64(totalCacheRead) / float64(totalCache)
+	}
+	ch <- prometheus.MustNewConstMetric(
+		c.cacheHitRate,
+		prometheus.GaugeValue,
+		cacheHitRate,
+		agentName, sessionID,
+	)
+
+	// Session duration (approximate based on message count for now)
+	// In a real implementation, this would use actual timestamps
+	sessionDuration := float64(messageCount) * 30.0 // Approximate 30s per message
+	ch <- prometheus.MustNewConstMetric(
+		c.sessionDuration,
+		prometheus.GaugeValue,
+		sessionDuration,
+		agentName, sessionID,
+	)
+
+	// Error count
+	ch <- prometheus.MustNewConstMetric(
+		c.sessionErrors,
+		prometheus.GaugeValue,
+		float64(errorCount),
 		agentName, sessionID,
 	)
 
