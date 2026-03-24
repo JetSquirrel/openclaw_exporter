@@ -8,8 +8,11 @@ Monitor your OpenClaw sessions, token usage, costs, and workspace health with Pr
 
 ### Session Metrics
 Track your AI assistant usage in real-time:
-- **Token usage**: input, output, cache read
+- **Token usage**: input, output, cache read, cache write
 - **Cost tracking**: cumulative cost in USD
+- **Cache efficiency**: cache hit rate calculation
+- **Session duration**: approximate session duration
+- **Error tracking**: count of errors in session
 - **Model info**: current provider and model
 - **Thinking level**: 0-3 scale
 - **Message count**: session activity
@@ -171,8 +174,12 @@ See [SKILL.md](./SKILL.md) for full systemd configuration.
 | `openclaw_session_tokens_input_total` | agent, session_id | Input tokens |
 | `openclaw_session_tokens_output_total` | agent, session_id | Output tokens |
 | `openclaw_session_tokens_cache_read_total` | agent, session_id | Cache read tokens |
+| `openclaw_session_tokens_cache_write_total` | agent, session_id | Cache write tokens |
 | `openclaw_session_tokens_total` | agent, session_id | Total tokens |
 | `openclaw_session_cost_total` | agent, session_id | Total cost (USD) |
+| `openclaw_session_cache_hit_rate` | agent, session_id | Cache hit rate (0-1) |
+| `openclaw_session_duration_seconds` | agent, session_id | Session duration |
+| `openclaw_session_errors_total` | agent, session_id | Error count |
 | `openclaw_model_info` | agent, session_id, provider, model | Current model |
 | `openclaw_thinking_level` | agent, session_id | Thinking level (0-3) |
 
@@ -200,6 +207,18 @@ openclaw_model_info
 
 # Average tokens per message
 openclaw_session_tokens_total / openclaw_session_messages_total
+
+# Cache hit rate (efficiency)
+openclaw_session_cache_hit_rate
+
+# Cache write tokens rate
+rate(openclaw_session_tokens_cache_write_total[5m]) * 60
+
+# Error rate per session
+rate(openclaw_session_errors_total[5m])
+
+# Average session duration
+avg(openclaw_session_duration_seconds)
 
 # Workspace health (all files exist?)
 sum(openclaw_workspace_file_exists) / count(openclaw_workspace_file_exists)

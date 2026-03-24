@@ -11,6 +11,7 @@ openclaw_exporter
 
 # Output of the go coverage tool
 *.out
+coverage.out
 
 # Dependency directories
 vendor/
@@ -18,7 +19,11 @@ vendor/
 # Go workspace file
 go.work
 
-# IDE
+# Go build / test artifacts
+.gocache/
+.gomodcache/
+
+# IDE / Editor
 .vscode/
 .idea/
 *.swp
@@ -28,3 +33,21 @@ go.work
 # OS
 .DS_Store
 Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Logs / temp files
+*.log
+*.tmp
+tmp/
+
+# Local tools / scripts
+tools/
+
+# Release artifacts
+openclaw-exporter-*.tar.gz
+openclaw-exporter-*.zip
+checksums.txt
