@@ -2,10 +2,13 @@ package collector
 
 import (
 	"bufio"
+	"context"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -14,9 +17,31 @@ import (
 // Default system skills directory (openclaw npm package location)
 const defaultSystemSkillsDir = "/opt/homebrew/lib/node_modules/openclaw/skills"
 
+const (
+	defaultScanInterval = 30 * time.Second
+	defaultScanTimeout  = 10 * time.Second
+)
+
+type fileStat struct {
+	name  string
+	size  float64
+	mtime float64
+}
+
+type scrapeSnapshot struct {
+	fileStats       []fileStat
+	workspaceExists map[string]float64
+	contextLength   float64
+	skillsCount     float64
+	agentsCount     float64
+	memoryFiles     float64
+	scrapeSuccess   float64
+}
+
 // OpenclawCollector collects metrics from openclaw data directory.
 type OpenclawCollector struct {
 	dir string
+	mu  sync.RWMutex
 
 	fileSize         *prometheus.Desc
 	fileMtime        *prometheus.Desc
@@ -26,11 +51,20 @@ type OpenclawCollector struct {
 	workspaceFiles   *prometheus.Desc
 	memoryFilesCount *prometheus.Desc
 	scrapeSuccess    *prometheus.Desc
+	scanDuration     *prometheus.Desc
+	scanErrors       *prometheus.Desc
+
+	scanInterval     time.Duration
+	scanTimeout      time.Duration
+	latencyCollector *ResponseLatencyCollector
+	snapshot         scrapeSnapshot
+	lastDuration     float64
+	scanErrorsTotal  uint64
 }
 
 // NewOpenclawCollector creates a new OpenclawCollector.
 func NewOpenclawCollector(dir string) *OpenclawCollector {
-	return &OpenclawCollector{
+	c := &OpenclawCollector{
 		dir: dir,
 		fileSize: prometheus.NewDesc(
 			"openclaw_file_size_bytes",
@@ -72,7 +106,100 @@ func NewOpenclawCollector(dir string) *OpenclawCollector {
 			"Whether the last scrape was successful",
 			nil, nil,
 		),
+		scanDuration: prometheus.NewDesc(
+			"openclaw_scan_duration_seconds",
+			"Duration of the last background scan in seconds",
+			nil, nil,
+		),
+		scanErrors: prometheus.NewDesc(
+			"openclaw_scan_errors_total",
+			"Total number of background scan errors",
+			nil, nil,
+		),
+		scanInterval:     defaultScanInterval,
+		scanTimeout:      defaultScanTimeout,
+		latencyCollector: NewResponseLatencyCollector(),
+		snapshot: scrapeSnapshot{
+			workspaceExists: make(map[string]float64),
+			scrapeSuccess:   0,
+		},
 	}
+
+	go c.startBackgroundRefresh()
+
+	return c
+}
+
+// LatencyCollector exposes the latency collector for registration.
+func (c *OpenclawCollector) LatencyCollector() *ResponseLatencyCollector {
+	return c.latencyCollector
+}
+
+func (c *OpenclawCollector) startBackgroundRefresh() {
+	c.refreshSnapshot()
+
+	ticker := time.NewTicker(c.scanInterval)
+	for range ticker.C {
+		c.refreshSnapshot()
+	}
+}
+
+func (c *OpenclawCollector) refreshSnapshot() {
+	ctx, cancel := context.WithTimeout(context.Background(), c.scanTimeout)
+	defer cancel()
+
+	start := time.Now()
+	snapshot := scrapeSnapshot{
+		workspaceExists: make(map[string]float64),
+	}
+
+	errorCount := 0
+
+	if err := c.collectFileMetrics(ctx, &snapshot); err != nil {
+		log.Printf("Error collecting file metrics: %v", err)
+		errorCount++
+	}
+
+	if err := c.collectWorkspaceFileMetrics(ctx, &snapshot); err != nil {
+		log.Printf("Error collecting workspace file metrics: %v", err)
+		errorCount++
+	}
+
+	if err := c.collectContextMetrics(ctx, &snapshot); err != nil {
+		log.Printf("Error collecting context metrics: %v", err)
+		errorCount++
+	}
+
+	if err := c.collectMemoryMetrics(ctx, &snapshot); err != nil {
+		log.Printf("Error collecting memory metrics: %v", err)
+		errorCount++
+	}
+
+	if err := c.collectSkillsMetrics(ctx, &snapshot); err != nil {
+		log.Printf("Error collecting skills metrics: %v", err)
+		errorCount++
+	}
+
+	if err := c.collectAgentsMetrics(ctx, &snapshot); err != nil {
+		log.Printf("Error collecting agents metrics: %v", err)
+		errorCount++
+	}
+
+	snapshot.scrapeSuccess = 1
+	if errorCount > 0 {
+		snapshot.scrapeSuccess = 0
+	}
+
+	duration := time.Since(start)
+	c.mu.Lock()
+	c.snapshot = snapshot
+	c.lastDuration = duration.Seconds()
+	if errorCount > 0 {
+		c.scanErrorsTotal += uint64(errorCount)
+	}
+	c.mu.Unlock()
+
+	c.latencyCollector.ObserveLatency("openclaw_scan", duration)
 }
 
 // Describe implements prometheus.Collector.
@@ -85,46 +212,87 @@ func (c *OpenclawCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.workspaceFiles
 	ch <- c.memoryFilesCount
 	ch <- c.scrapeSuccess
+	ch <- c.scanDuration
+	ch <- c.scanErrors
 }
 
 // Collect implements prometheus.Collector.
 func (c *OpenclawCollector) Collect(ch chan<- prometheus.Metric) {
-	success := 1.0
+	c.mu.RLock()
+	snapshot := c.snapshot
+	duration := c.lastDuration
+	scanErrorsTotal := c.scanErrorsTotal
+	c.mu.RUnlock()
 
-	if err := c.collectFileMetrics(ch); err != nil {
-		log.Printf("Error collecting file metrics: %v", err)
-		success = 0
+	for _, stat := range snapshot.fileStats {
+		ch <- prometheus.MustNewConstMetric(
+			c.fileSize,
+			prometheus.GaugeValue,
+			stat.size,
+			stat.name,
+		)
+
+		ch <- prometheus.MustNewConstMetric(
+			c.fileMtime,
+			prometheus.GaugeValue,
+			stat.mtime,
+			stat.name,
+		)
 	}
 
-	if err := c.collectWorkspaceFileMetrics(ch); err != nil {
-		log.Printf("Error collecting workspace file metrics: %v", err)
-		success = 0
+	for file, exists := range snapshot.workspaceExists {
+		ch <- prometheus.MustNewConstMetric(
+			c.workspaceFiles,
+			prometheus.GaugeValue,
+			exists,
+			file,
+		)
 	}
 
-	if err := c.collectContextMetrics(ch); err != nil {
-		log.Printf("Error collecting context metrics: %v", err)
-		success = 0
-	}
+	ch <- prometheus.MustNewConstMetric(
+		c.contextLength,
+		prometheus.GaugeValue,
+		snapshot.contextLength,
+	)
 
-	if err := c.collectMemoryMetrics(ch); err != nil {
-		log.Printf("Error collecting memory metrics: %v", err)
-		success = 0
-	}
+	ch <- prometheus.MustNewConstMetric(
+		c.skillsCount,
+		prometheus.GaugeValue,
+		snapshot.skillsCount,
+	)
 
-	if err := c.collectSkillsMetrics(ch); err != nil {
-		log.Printf("Error collecting skills metrics: %v", err)
-		success = 0
-	}
+	ch <- prometheus.MustNewConstMetric(
+		c.agentsCount,
+		prometheus.GaugeValue,
+		snapshot.agentsCount,
+	)
 
-	if err := c.collectAgentsMetrics(ch); err != nil {
-		log.Printf("Error collecting agents metrics: %v", err)
-		success = 0
-	}
+	ch <- prometheus.MustNewConstMetric(
+		c.memoryFilesCount,
+		prometheus.GaugeValue,
+		snapshot.memoryFiles,
+	)
 
-	ch <- prometheus.MustNewConstMetric(c.scrapeSuccess, prometheus.GaugeValue, success)
+	ch <- prometheus.MustNewConstMetric(
+		c.scrapeSuccess,
+		prometheus.GaugeValue,
+		snapshot.scrapeSuccess,
+	)
+
+	ch <- prometheus.MustNewConstMetric(
+		c.scanDuration,
+		prometheus.GaugeValue,
+		duration,
+	)
+
+	ch <- prometheus.MustNewConstMetric(
+		c.scanErrors,
+		prometheus.CounterValue,
+		float64(scanErrorsTotal),
+	)
 }
 
-func (c *OpenclawCollector) collectFileMetrics(ch chan<- prometheus.Metric) error {
+func (c *OpenclawCollector) collectFileMetrics(ctx context.Context, snapshot *scrapeSnapshot) error {
 	// Monitor core workspace files
 	// Use a map to track which files we've already seen (case-insensitive)
 	// to avoid counting both SOUL.md and soul.md
@@ -138,6 +306,10 @@ func (c *OpenclawCollector) collectFileMetrics(ch chan<- prometheus.Metric) erro
 	reported := make(map[string]bool)
 
 	for _, file := range files {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		// Get the lowercase version for deduplication check
 		fileLower := strings.ToLower(file)
 
@@ -159,25 +331,17 @@ func (c *OpenclawCollector) collectFileMetrics(ch chan<- prometheus.Metric) erro
 		// Mark this base name as reported
 		reported[fileLower] = true
 
-		ch <- prometheus.MustNewConstMetric(
-			c.fileSize,
-			prometheus.GaugeValue,
-			float64(info.Size()),
-			file,
-		)
-
-		ch <- prometheus.MustNewConstMetric(
-			c.fileMtime,
-			prometheus.GaugeValue,
-			float64(info.ModTime().Unix()),
-			file,
-		)
+		snapshot.fileStats = append(snapshot.fileStats, fileStat{
+			name:  file,
+			size:  float64(info.Size()),
+			mtime: float64(info.ModTime().Unix()),
+		})
 	}
 
 	return nil
 }
 
-func (c *OpenclawCollector) collectWorkspaceFileMetrics(ch chan<- prometheus.Metric) error {
+func (c *OpenclawCollector) collectWorkspaceFileMetrics(ctx context.Context, snapshot *scrapeSnapshot) error {
 	// Check existence of key workspace files
 	workspaceFiles := []string{
 		"AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md",
@@ -185,46 +349,53 @@ func (c *OpenclawCollector) collectWorkspaceFileMetrics(ch chan<- prometheus.Met
 	}
 
 	for _, file := range workspaceFiles {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		path := filepath.Join(c.dir, file)
 		exists := 0.0
 		if _, err := os.Stat(path); err == nil {
 			exists = 1.0
+		} else if err != nil && !os.IsNotExist(err) {
+			return err
 		}
 
-		ch <- prometheus.MustNewConstMetric(
-			c.workspaceFiles,
-			prometheus.GaugeValue,
-			exists,
-			file,
-		)
+		snapshot.workspaceExists[file] = exists
 	}
 
 	return nil
 }
 
-func (c *OpenclawCollector) collectMemoryMetrics(ch chan<- prometheus.Metric) error {
+func (c *OpenclawCollector) collectMemoryMetrics(ctx context.Context, snapshot *scrapeSnapshot) error {
 	// Count daily memory files in memory/ directory
 	memoryDir := filepath.Join(c.dir, "memory")
 	count := 0
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
-	if entries, err := os.ReadDir(memoryDir); err == nil {
-		for _, entry := range entries {
-			if !entry.IsDir() && filepath.Ext(entry.Name()) == ".md" {
-				count++
-			}
+	entries, err := os.ReadDir(memoryDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			snapshot.memoryFiles = 0
+			return nil
+		}
+		return err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".md" {
+			count++
 		}
 	}
 
-	ch <- prometheus.MustNewConstMetric(
-		c.memoryFilesCount,
-		prometheus.GaugeValue,
-		float64(count),
-	)
+	snapshot.memoryFiles = float64(count)
 
 	return nil
 }
 
-func (c *OpenclawCollector) collectContextMetrics(ch chan<- prometheus.Metric) error {
+func (c *OpenclawCollector) collectContextMetrics(ctx context.Context, snapshot *scrapeSnapshot) error {
 	contextFiles, err := filepath.Glob(filepath.Join(c.dir, "context*.md"))
 	if err != nil {
 		return err
@@ -232,6 +403,10 @@ func (c *OpenclawCollector) collectContextMetrics(ch chan<- prometheus.Metric) e
 
 	var totalLength int64
 	for _, path := range contextFiles {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		info, err := os.Stat(path)
 		if err != nil {
 			continue
@@ -239,17 +414,16 @@ func (c *OpenclawCollector) collectContextMetrics(ch chan<- prometheus.Metric) e
 		totalLength += info.Size()
 	}
 
-	ch <- prometheus.MustNewConstMetric(
-		c.contextLength,
-		prometheus.GaugeValue,
-		float64(totalLength),
-	)
+	snapshot.contextLength = float64(totalLength)
 
 	return nil
 }
 
-func (c *OpenclawCollector) collectSkillsMetrics(ch chan<- prometheus.Metric) error {
+func (c *OpenclawCollector) collectSkillsMetrics(ctx context.Context, snapshot *scrapeSnapshot) error {
 	totalCount := 0
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// Check legacy skill.md file for H2 sections
 	skillPath := filepath.Join(c.dir, "skill.md")
@@ -261,6 +435,10 @@ func (c *OpenclawCollector) collectSkillsMetrics(ch chan<- prometheus.Metric) er
 	skillsDir := filepath.Join(c.dir, "skills")
 	if entries, err := os.ReadDir(skillsDir); err == nil {
 		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+
 			if entry.IsDir() {
 				skillFile := filepath.Join(skillsDir, entry.Name(), "SKILL.md")
 				if _, err := os.Stat(skillFile); err == nil {
@@ -268,6 +446,8 @@ func (c *OpenclawCollector) collectSkillsMetrics(ch chan<- prometheus.Metric) er
 				}
 			}
 		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
 	}
 
 	// Check user skills directory at ~/.openclaw/skills
@@ -276,6 +456,10 @@ func (c *OpenclawCollector) collectSkillsMetrics(ch chan<- prometheus.Metric) er
 		userSkillsDir := filepath.Join(homeDir, ".openclaw", "skills")
 		if entries, err := os.ReadDir(userSkillsDir); err == nil {
 			for _, entry := range entries {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+
 				if entry.IsDir() {
 					skillFile := filepath.Join(userSkillsDir, entry.Name(), "SKILL.md")
 					if _, err := os.Stat(skillFile); err == nil {
@@ -283,37 +467,43 @@ func (c *OpenclawCollector) collectSkillsMetrics(ch chan<- prometheus.Metric) er
 					}
 				}
 			}
+		} else if err != nil && !os.IsNotExist(err) {
+			return err
 		}
 	}
 
 	// Check system skills directory (openclaw npm package)
 	// Can be overridden via OPENCLAW_SKILLS_DIR environment variable
-	systemSkillsDir := os.Getenv("OPENCLAW_SKILLS_DIR")
-	if systemSkillsDir == "" {
-		systemSkillsDir = defaultSystemSkillsDir
-	}
-	if entries, err := os.ReadDir(systemSkillsDir); err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() {
-				skillFile := filepath.Join(systemSkillsDir, entry.Name(), "SKILL.md")
-				if _, err := os.Stat(skillFile); err == nil {
-					totalCount++
+	systemSkillsDir := resolveSystemSkillsDir()
+	if systemSkillsDir != "" {
+		if entries, err := os.ReadDir(systemSkillsDir); err == nil {
+			for _, entry := range entries {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+
+				if entry.IsDir() {
+					skillFile := filepath.Join(systemSkillsDir, entry.Name(), "SKILL.md")
+					if _, err := os.Stat(skillFile); err == nil {
+						totalCount++
+					}
 				}
 			}
+		} else if !os.IsNotExist(err) {
+			return err
 		}
 	}
 
-	ch <- prometheus.MustNewConstMetric(
-		c.skillsCount,
-		prometheus.GaugeValue,
-		float64(totalCount),
-	)
+	snapshot.skillsCount = float64(totalCount)
 
 	return nil
 }
 
-func (c *OpenclawCollector) collectAgentsMetrics(ch chan<- prometheus.Metric) error {
+func (c *OpenclawCollector) collectAgentsMetrics(ctx context.Context, snapshot *scrapeSnapshot) error {
 	totalCount := 0
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// Check legacy agent.md file for agent definitions (H2 sections)
 	// Note: AGENTS.md is a workspace configuration document, not an agent list
@@ -322,13 +512,23 @@ func (c *OpenclawCollector) collectAgentsMetrics(ch chan<- prometheus.Metric) er
 		totalCount += count
 	}
 
-	ch <- prometheus.MustNewConstMetric(
-		c.agentsCount,
-		prometheus.GaugeValue,
-		float64(totalCount),
-	)
+	snapshot.agentsCount = float64(totalCount)
 
 	return nil
+}
+
+func resolveSystemSkillsDir() string {
+	if systemSkillsDir := os.Getenv("OPENCLAW_SKILLS_DIR"); systemSkillsDir != "" {
+		return systemSkillsDir
+	}
+
+	if runtime.GOOS == "darwin" {
+		if _, err := os.Stat(defaultSystemSkillsDir); err == nil {
+			return defaultSystemSkillsDir
+		}
+	}
+
+	return ""
 }
 
 // countMarkdownSections counts the number of H2 sections (##) in a markdown file.
@@ -343,8 +543,11 @@ func countMarkdownSections(path string) (int, error) {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "## ") {
-			count++
+		if strings.HasPrefix(line, "##") {
+			rest := strings.TrimLeft(line[2:], " \t")
+			if rest != "" {
+				count++
+			}
 		}
 	}
 
@@ -358,7 +561,6 @@ func countMarkdownSections(path string) (int, error) {
 // ResponseLatencyCollector tracks response latency metrics.
 type ResponseLatencyCollector struct {
 	histogram *prometheus.HistogramVec
-	startTime time.Time
 }
 
 // NewResponseLatencyCollector creates a new ResponseLatencyCollector.
@@ -372,7 +574,6 @@ func NewResponseLatencyCollector() *ResponseLatencyCollector {
 			},
 			[]string{"operation"},
 		),
-		startTime: time.Now(),
 	}
 }
 

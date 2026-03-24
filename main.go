@@ -14,10 +14,10 @@ import (
 
 func main() {
 	var (
-		listenAddr    = flag.String("web.listen-address", ":9101", "Address to listen on for web interface and telemetry")
-		metricsPath   = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics")
-		openclawDir   = flag.String("openclaw.dir", os.Getenv("OPENCLAW_DIR"), "Path to openclaw workspace directory")
-		openclawHome  = flag.String("openclaw.home", os.Getenv("OPENCLAW_HOME"), "Path to openclaw home directory (default: ~/.openclaw)")
+		listenAddr   = flag.String("web.listen-address", ":9101", "Address to listen on for web interface and telemetry")
+		metricsPath  = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics")
+		openclawDir  = flag.String("openclaw.dir", os.Getenv("OPENCLAW_DIR"), "Path to openclaw workspace directory")
+		openclawHome = flag.String("openclaw.home", os.Getenv("OPENCLAW_HOME"), "Path to openclaw home directory (default: ~/.openclaw)")
 	)
 	flag.Parse()
 
@@ -35,7 +35,7 @@ func main() {
 
 	// Register workspace collector
 	openclawCollector := collector.NewOpenclawCollector(*openclawDir)
-	registry.MustRegister(openclawCollector)
+	registry.MustRegister(openclawCollector, openclawCollector.LatencyCollector())
 
 	// Register session collector
 	sessionCollector := collector.NewSessionCollector(openclawHomePath)
