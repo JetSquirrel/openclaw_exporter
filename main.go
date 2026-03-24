@@ -43,13 +43,15 @@ func main() {
 
 	http.Handle(*metricsPath, promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `<html>
+		if _, err := fmt.Fprintf(w, `<html>
 <head><title>Openclaw Exporter</title></head>
 <body>
 <h1>Openclaw Exporter</h1>
 <p><a href="%s">Metrics</a></p>
 </body>
-</html>`, *metricsPath)
+</html>`, *metricsPath); err != nil {
+			log.Printf("Error writing response: %v", err)
+		}
 	})
 
 	log.Printf("Starting openclaw exporter on %s", *listenAddr)
